@@ -36,6 +36,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def collect_files(path: Path, file_format: str, recursive: bool) -> List[Path]:
+    # Accept either a single file or a directory tree of tables.
     if path.is_file():
         return [path]
     pattern = f"**/*.{file_format}" if recursive else f"*.{file_format}"
@@ -43,6 +44,7 @@ def collect_files(path: Path, file_format: str, recursive: bool) -> List[Path]:
 
 
 def load_checkpoint(path: Path, map_location: str):
+    # Support both newer and older torch.load signatures.
     try:
         return torch.load(path, map_location=map_location, weights_only=True)
     except TypeError:
@@ -52,6 +54,7 @@ def load_checkpoint(path: Path, map_location: str):
 def run_one_file(model, file_path: Path, args, window_k: int, root_input: Path) -> None:
     df = read_table(file_path, args.format)
     piece = build_piece(df, require_labels=False)
+    # Build a windowed dataset over a single piece.
     ds = NoteWindowDataset([piece], window_k=window_k, include_labels=False)
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False)
 
@@ -67,24 +70,25 @@ def run_one_file(model, file_path: Path, args, window_k: int, root_input: Path) 
     action_logits = np.concatenate(action_logits)
     pitch_logits = np.concatenate(pitch_logits)
 
+    # Convert logits to probabilities for thresholding and outputs.
     action_probs = torch.softmax(torch.tensor(action_logits), dim=1).numpy()
 
     # error probability = P(REPLACE)+P(DELETE)
     error_prob = action_probs[:, 1] + action_probs[:, 2]
 
-    # threshold on error_prob
+    # Threshold on error_prob to decide which notes are treated as errors.
     action_ids = np.zeros(len(action_probs), dtype=np.int64)
     if args.error_threshold > 0.0:
         err_mask = error_prob >= args.error_threshold
     else:
-        # 不设阈值时等价于 argmax!=KEEP（兼容旧行为）
+        # If no threshold is set, this is equivalent to argmax != KEEP (legacy behavior)
         err_mask = action_probs.argmax(axis=1) != 0
 
     replace_ge_delete = action_probs[:, 1] >= action_probs[:, 2]
     action_ids[err_mask & replace_ge_delete] = 1
     action_ids[err_mask & (~replace_ge_delete)] = 2
 
-    # 输出给用户看的置信度统一用 error_prob
+    # Use error_prob as the user-facing confidence score.
     action_conf = error_prob
 
     pitch_probs = torch.softmax(torch.tensor(pitch_logits), dim=1).numpy()
@@ -93,6 +97,7 @@ def run_one_file(model, file_path: Path, args, window_k: int, root_input: Path) 
     topk_idx = sorted_idx[:, : args.topk]
     topk_probs = np.take_along_axis(pitch_probs, topk_idx, axis=1)
 
+    # Attach predictions to the original table order for downstream use.
     out_df = piece.df_sorted.copy()
     out_df["pred_action"] = [ACTION_NAMES[int(i)] for i in action_ids]
     out_df["pred_action_id"] = action_ids
@@ -105,6 +110,7 @@ def run_one_file(model, file_path: Path, args, window_k: int, root_input: Path) 
     out_df["p_replace"] = action_probs[:, 1]
     out_df["p_delete"] = action_probs[:, 2]
 
+    # Restore original row ordering and write the output file.
     restored = out_df.sort_values("orig_index").drop(columns=["orig_index"]).reset_index(drop=True)
     if root_input.is_dir() and args.recursive:
         rel = file_path.relative_to(root_input)
@@ -127,6 +133,7 @@ def main() -> None:
     model.load_state_dict(ckpt["model_state"])
     model.eval()
 
+    # Expand input into a list of files to process.
     files = collect_files(args.input_path, args.format, args.recursive)
     if not files:
         raise RuntimeError("No input files found for inference.")

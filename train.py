@@ -47,12 +47,14 @@ def parse_args() -> argparse.Namespace:
 
 
 def set_seed(seed: int) -> None:
+    # Best-effort determinism for dataset sampling and model init.
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
 
 
 def load_split(data_root: Path, split: str, file_format: str, max_files: int = 0) -> List:
+    # Load all pieces in a split into memory as PieceData.
     pieces = []
     files = list_split_files(data_root, split, file_format)
     if max_files > 0:
@@ -81,6 +83,7 @@ def eval_epoch(
         for batch in loader:
             batch = {k: v.to(device) for k, v in batch.items()}
             out = model(batch)
+            # Action loss always computed; pitch loss only when labels are valid.
             la = F.cross_entropy(out["logits_action"], batch["y_action"], weight=class_weights)
             lp = safe_pitch_loss(out["logits_pitch"], batch["y_pitch"])
             losses.append((la + lambda_pitch * lp).item())
@@ -96,6 +99,7 @@ def eval_epoch(
     y_pitch_true_np = np.concatenate(y_pitch_true)
     logits_pitch_np = np.concatenate(logits_pitch_all)
 
+    # Aggregate metrics for logging and model selection.
     metrics = classification_metrics(y_true_np, y_pred_np)
     metrics.update(pitch_metrics(y_true_np, y_pitch_true_np, logits_pitch_np, topk=5))
     end_to_end_mask = y_true_np == y_pred_np
@@ -108,6 +112,7 @@ def eval_epoch(
 
 
 def safe_pitch_loss(logits_pitch: torch.Tensor, y_pitch: torch.Tensor) -> torch.Tensor:
+    # Ignore pitch loss for non-REPLACE labels (y_pitch == -100).
     valid = y_pitch != -100
     if valid.any():
         return F.cross_entropy(logits_pitch[valid], y_pitch[valid])
@@ -115,6 +120,7 @@ def safe_pitch_loss(logits_pitch: torch.Tensor, y_pitch: torch.Tensor) -> torch.
 
 
 def load_checkpoint(path: Path, map_location: str) -> Dict:
+    # Support both newer and older torch.load signatures.
     try:
         return torch.load(path, map_location=map_location, weights_only=True)
     except TypeError:
@@ -131,6 +137,7 @@ class NumpyWeightedSampler(Sampler[int]):
         total = float(w.sum())
         if not np.isfinite(total) or total <= 0:
             raise ValueError("weights must have a positive finite sum")
+        # Normalize once to keep sampling fast.
         self.prob = w / total
         self.num_samples = int(num_samples)
 
@@ -154,6 +161,7 @@ def main() -> None:
         raise RuntimeError("No training files found.")
     print(f"loaded files: train={len(train_pieces)} val={len(val_pieces)} test={len(test_pieces)}")
 
+    # Embedding sizes are derived from the training data.
     num_programs = max(int(p.program.max()) for p in train_pieces) + 1
     num_insts = max(int(p.inst.max()) for p in train_pieces) + 1
 
@@ -161,6 +169,7 @@ def main() -> None:
     val_ds = NoteWindowDataset(val_pieces, args.window_k, include_labels=True) if val_pieces else None
     test_ds = NoteWindowDataset(test_pieces, args.window_k, include_labels=True) if test_pieces else None
 
+    # Optional class balancing to counter the KEEP-dominated label distribution.
     if args.use_weighted_sampler:
         labels_for_sampler = np.concatenate([p.label for p in train_pieces])
         counts_for_sampler = np.bincount(labels_for_sampler, minlength=3).astype(np.float64)
@@ -181,6 +190,7 @@ def main() -> None:
     val_loader = DataLoader(val_ds, batch_size=args.eval_batch_size, shuffle=False) if val_ds else None
     test_loader = DataLoader(test_ds, batch_size=args.eval_batch_size, shuffle=False) if test_ds else None
 
+    # Class weights are used in the action loss.
     labels = np.concatenate([p.label for p in train_pieces])
     counts = np.bincount(labels, minlength=3).astype(np.float32)
     class_weights = counts.sum() / np.maximum(counts, 1)
@@ -216,6 +226,7 @@ def main() -> None:
         logs.append(row)
         print(json.dumps(row, ensure_ascii=False))
 
+        # Always persist the latest checkpoint and update the best by macro-F1.
         ckpt = {
             "model_state": model.state_dict(),
             "model_args": {"num_programs": num_programs, "num_insts": num_insts},
@@ -233,12 +244,14 @@ def main() -> None:
             print(f"early_stop at epoch={epoch}, best_epoch={best_epoch}")
             break
 
+    # Optional final test evaluation using the best checkpoint.
     if test_loader and not args.skip_test_eval:
         best = load_checkpoint(args.save_dir / "best.pt", map_location=args.device)
         model.load_state_dict(best["model_state"])
         test_metrics = eval_epoch(model, test_loader, args.device, args.lambda_pitch, class_weights)
         print("test_metrics", json.dumps(test_metrics, ensure_ascii=False))
 
+    # Persist per-epoch metrics for later analysis.
     with (args.save_dir / "train_log.json").open("w", encoding="utf-8") as f:
         json.dump(logs, f, ensure_ascii=False, indent=2)
 

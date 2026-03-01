@@ -18,6 +18,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def iter_split_files(root: Path, split: str, file_format: str):
+    # List all tables in a given split directory.
     split_dir = root / split
     if not split_dir.exists():
         return []
@@ -45,6 +46,7 @@ def main() -> None:
 
         for fp in files:
             df = read_table(fp, args.format)
+            # Clean-only tables are labeled as KEEP with no correction pitch.
             df["label"] = 0
             df["correct_pitch"] = -1
             if "case" not in df.columns:
@@ -57,6 +59,7 @@ def main() -> None:
             write_table(df, out_path, args.format)
 
             if merge_split is not None:
+                # Optionally merge into a shared target root.
                 write_table(df, merge_split / out_name, args.format)
 
             total += 1

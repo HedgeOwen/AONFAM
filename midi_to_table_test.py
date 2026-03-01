@@ -20,6 +20,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def write_table(df: pd.DataFrame, out_path: Path, file_format: str) -> None:
+    # Keep IO format handling consistent across scripts.
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if file_format == "csv":
         df.to_csv(out_path, index=False)
@@ -35,6 +36,7 @@ def midi_to_note_table(
     """
     Convert one MIDI to the same schema used by midi_diagnose.py.
     """
+    # Parse MIDI into a flat note table.
     pm = pretty_midi.PrettyMIDI(str(midi_path))
     rows: List[dict] = []
     piece_id = midi_path.stem
@@ -49,6 +51,7 @@ def midi_to_note_table(
             duration = max(0.0, offset - onset)
             onset_bin = int(round(onset / onset_bin_size)) if onset_bin_size > 0 else int(round(onset * 100))
 
+            # One row per note; beat/bar placeholders are -1 for this simple converter.
             rows.append(
                 {
                     "piece_id": piece_id,
@@ -76,6 +79,7 @@ def midi_to_note_table(
         )
 
     df = pd.DataFrame(rows)
+    # Stable ordering and explicit note_id assignment.
     df = df.sort_values(["onset", "offset", "inst_id", "pitch", "velocity"]).reset_index(drop=True)
     df.insert(1, "note_id", np.arange(len(df), dtype=np.int64))
     return df
@@ -88,6 +92,7 @@ def main() -> None:
         onset_bin_size=args.onset_bin_size,
         drop_drums=args.drop_drums,
     )
+    # Write output and report basic stats.
     write_table(df, args.out, args.format)
     print(f"converted: {args.midi}")
     print(f"rows={len(df)}")

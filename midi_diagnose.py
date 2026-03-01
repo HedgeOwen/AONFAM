@@ -25,13 +25,14 @@ def midi_to_note_table(
 ) -> pd.DataFrame:
     """
     Convert one MIDI file to the note-event table schema expected by the model.
-    This is intentionally aligned with midi_to_table.py.
+    This is intentionally aligned with midi_to_table_train.py.
 
     Output columns:
       piece_id, note_id, inst_id, program, is_drum,
       onset, offset, duration, pitch, velocity,
       onset_bin, beat_id, bar_id
     """
+    # Parse MIDI and flatten into a per-note table.
     pm = pretty_midi.PrettyMIDI(str(midi_path))
     rows: List[dict] = []
     piece_id = midi_path.stem
@@ -103,6 +104,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_checkpoint(path: Path, map_location: str):
+    # Support both newer and older torch.load signatures.
     try:
         return torch.load(path, map_location=map_location, weights_only=True)
     except TypeError:
@@ -110,6 +112,7 @@ def load_checkpoint(path: Path, map_location: str):
 
 
 def safe_device(requested: str) -> str:
+    # Provide a clear fallback if CUDA is requested but unavailable.
     if requested.startswith("cuda") and not torch.cuda.is_available():
         print("[WARN] CUDA requested but not available; falling back to cpu")
         return "cpu"
@@ -137,7 +140,7 @@ def main() -> None:
     model.load_state_dict(ckpt["model_state"])
     model.eval()
 
-    # Build table from MIDI (aligned with midi_to_table.py)
+    # Build table from MIDI (aligned with midi_to_table_train.py)
     df = midi_to_note_table(
         args.midi,
         onset_bin_size=args.onset_bin_size,
@@ -158,6 +161,7 @@ def main() -> None:
             action_logits_list.append(out["logits_action"].detach().cpu().numpy())
             pitch_logits_list.append(out["logits_pitch"].detach().cpu().numpy())
 
+    # Handle empty MIDI files safely.
     if action_logits_list:
         action_logits = np.concatenate(action_logits_list, axis=0)
         pitch_logits = np.concatenate(pitch_logits_list, axis=0)
@@ -183,6 +187,7 @@ def main() -> None:
         p_delete = np.array([], dtype=np.float32)
         error_prob = np.array([], dtype=np.float32)
 
+    # Decide actions using the same threshold logic as infer.py.
     action_ids = np.zeros(len(action_probs), dtype=np.int64)
     if args.threshold > 0.0:
         err_mask = error_prob >= args.threshold
@@ -225,6 +230,7 @@ def main() -> None:
         for i, v in enumerate(topk_probs)
     ]
 
+    # Restore original row ordering for user-facing output.
     restored = out_df.sort_values("orig_index").drop(columns=["orig_index"]).reset_index(drop=True)
 
     error_df = restored[restored["pred_action_id"] != 0].copy()

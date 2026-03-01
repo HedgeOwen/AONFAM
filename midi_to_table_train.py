@@ -21,6 +21,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def write_table(df: pd.DataFrame, out_path: Path, file_format: str) -> None:
+    # Keep IO format handling consistent across scripts.
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if file_format == "csv":
         df.to_csv(out_path, index=False)
@@ -29,6 +30,7 @@ def write_table(df: pd.DataFrame, out_path: Path, file_format: str) -> None:
 
 
 def pick_program_and_drum(inst: pretty_midi.Instrument) -> Tuple[int, int]:
+    # Helper to normalize pretty_midi fields into ints.
     return int(inst.program), int(inst.is_drum)
 
 
@@ -45,6 +47,7 @@ def build_note_rows(pm: pretty_midi.PrettyMIDI, piece_id: str, onset_bin_size: f
             offset = float(n.end)
             duration = max(0.0, offset - onset)
             onset_bin = int(round(onset / onset_bin_size)) if onset_bin_size > 0 else int(round(onset * 100))
+            # One row per note event.
             rows.append(
                 {
                     "piece_id": piece_id,
@@ -67,6 +70,7 @@ def build_note_rows(pm: pretty_midi.PrettyMIDI, piece_id: str, onset_bin_size: f
 
 
 def convert_one(midi_path: Path, out_path: Path, piece_id: str, file_format: str, onset_bin_size: float) -> None:
+    # Parse MIDI and write a schema-compatible table.
     pm = pretty_midi.PrettyMIDI(str(midi_path))
     rows = build_note_rows(pm, piece_id=piece_id, onset_bin_size=onset_bin_size)
     df = pd.DataFrame(rows)
@@ -118,6 +122,7 @@ def main() -> None:
                 print(f"skip missing midi: {midi_path}")
                 continue
 
+            # Derive a stable piece id from the MAESTRO relative path.
             piece_id = rel_midi.with_suffix("").as_posix().replace("/", "__")
             out_path = out_split / f"{rel_midi.stem}.{args.format}"
             convert_one(midi_path, out_path, piece_id, args.format, args.onset_bin_size)

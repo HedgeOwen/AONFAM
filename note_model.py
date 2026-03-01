@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset
 
+# Base schema for note tables used across training/inference.
 REQUIRED_COLUMNS = [
     "piece_id",
     "note_id",
@@ -26,12 +27,14 @@ REQUIRED_COLUMNS = [
     "bar_id",
 ]
 LABEL_COLUMNS = ["label", "correct_pitch"]
+# Action ids used throughout training and inference.
 ACTION_NAMES = {0: "KEEP", 1: "REPLACE", 2: "DELETE"}
 ACTION_IDS = {v: k for k, v in ACTION_NAMES.items()}
 
 
 @dataclass
 class PieceData:
+    # Pre-extracted arrays for a single piece to speed up window sampling.
     df_sorted: pd.DataFrame
     pitch: np.ndarray
     program: np.ndarray
@@ -51,6 +54,7 @@ class NoteWindowDataset(Dataset):
         self.window_k = window_k
         self.include_labels = include_labels
         self.index_map: List[Tuple[int, int]] = []
+        # Build an index of (piece_id, center_note_idx) pairs.
         for p_idx, piece in enumerate(self.pieces):
             self.index_map.extend((p_idx, i) for i in range(len(piece.pitch)))
 
@@ -63,6 +67,7 @@ class NoteWindowDataset(Dataset):
         k = self.window_k
         length = 2 * k + 1
 
+        # Initialize fixed-length windows and a validity mask for padding.
         pitch_seq = np.zeros(length, dtype=np.int64)
         program_seq = np.zeros(length, dtype=np.int64)
         inst_seq = np.zeros(length, dtype=np.int64)
@@ -75,9 +80,11 @@ class NoteWindowDataset(Dataset):
         center_beat = piece.beat[center]
         center_bar = piece.bar[center]
 
+        # Populate window features centered at "center".
         for j, src in enumerate(range(start, end)):
             if 0 <= src < len(piece.pitch):
                 valid_mask[j] = True
+                # Offset ids by +1 to keep 0 reserved for padding.
                 pitch_seq[j] = int(piece.pitch[src]) + 1
                 program_seq[j] = int(piece.program[src]) + 1
                 inst_seq[j] = int(piece.inst[src]) + 1
@@ -90,6 +97,7 @@ class NoteWindowDataset(Dataset):
                 cont_seq[j, 3] = float(delta_beat)
                 cont_seq[j, 4] = float(delta_bar)
 
+        # Guard against NaN/Inf values from duration logs or missing fields.
         cont_seq = np.nan_to_num(cont_seq, nan=0.0, posinf=0.0, neginf=0.0)
 
         out: Dict[str, torch.Tensor] = {
@@ -100,6 +108,7 @@ class NoteWindowDataset(Dataset):
             "valid_mask": torch.from_numpy(valid_mask),
         }
 
+        # For REPLACE actions, y_pitch is the corrected pitch; otherwise ignore.
         if self.include_labels and piece.label is not None and piece.correct_pitch is not None:
             out["y_action"] = torch.tensor(int(piece.label[center]), dtype=torch.long)
             y_pitch = int(piece.correct_pitch[center]) if int(piece.label[center]) == 1 else -100
@@ -120,6 +129,7 @@ class NoteCorrectionModel(nn.Module):
         num_layers: int = 2,
     ):
         super().__init__()
+        # 0 is reserved for padding in all categorical embeddings.
         self.pitch_emb = nn.Embedding(129, pitch_emb_dim, padding_idx=0)
         self.program_emb = nn.Embedding(num_programs + 1, program_emb_dim, padding_idx=0)
         self.inst_emb = nn.Embedding(num_insts + 1, inst_emb_dim, padding_idx=0)
@@ -146,6 +156,7 @@ class NoteCorrectionModel(nn.Module):
         pitch_e = self.pitch_emb(pitch_ids)
         program_e = self.program_emb(program_ids)
         inst_e = self.inst_emb(inst_ids)
+        # Concatenate embeddings with continuous features and encode with a BiGRU.
         x = torch.cat([pitch_e, program_e, inst_e, batch["cont_seq"]], dim=-1)
         enc, _ = self.encoder(x)
         center_idx = enc.size(1) // 2
@@ -157,6 +168,7 @@ class NoteCorrectionModel(nn.Module):
 
 
 def read_table(path: Path, file_format: str) -> pd.DataFrame:
+    # Small helper to keep IO format handling consistent across scripts.
     if file_format == "csv":
         return pd.read_csv(path)
     if file_format == "parquet":
@@ -165,6 +177,7 @@ def read_table(path: Path, file_format: str) -> pd.DataFrame:
 
 
 def write_table(df: pd.DataFrame, path: Path, file_format: str) -> None:
+    # Ensure output directory exists before writing.
     path.parent.mkdir(parents=True, exist_ok=True)
     if file_format == "csv":
         df.to_csv(path, index=False)
@@ -175,6 +188,7 @@ def write_table(df: pd.DataFrame, path: Path, file_format: str) -> None:
 
 
 def validate_columns(df: pd.DataFrame, require_labels: bool) -> None:
+    # Validate schema before training/inference to avoid silent errors.
     required = REQUIRED_COLUMNS + (LABEL_COLUMNS if require_labels else [])
     missing = [c for c in required if c not in df.columns]
     if missing:
@@ -183,6 +197,7 @@ def validate_columns(df: pd.DataFrame, require_labels: bool) -> None:
 
 def build_piece(df: pd.DataFrame, require_labels: bool) -> PieceData:
     validate_columns(df, require_labels=require_labels)
+    # Keep a stable ordering and remember original indices for later restoration.
     sorted_df = df.sort_values(["onset", "pitch", "note_id"]).reset_index(drop=False).rename(columns={"index": "orig_index"})
     kwargs = dict(
         df_sorted=sorted_df,
@@ -202,6 +217,7 @@ def build_piece(df: pd.DataFrame, require_labels: bool) -> PieceData:
 
 
 def list_split_files(data_root: Path, split: str, file_format: str) -> List[Path]:
+    # Discover files in a train/validation/test split directory.
     split_dir = data_root / split
     if not split_dir.exists():
         return []
@@ -211,6 +227,7 @@ def list_split_files(data_root: Path, split: str, file_format: str) -> List[Path
 
 def classification_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
     eps = 1e-9
+    # Macro-F1 over the three action classes.
     f1s = []
     for c in [0, 1, 2]:
         tp = np.sum((y_true == c) & (y_pred == c))

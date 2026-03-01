@@ -1,14 +1,14 @@
-# 本地运行指南（PyTorch）
+# Local Run Guide (PyTorch)
 
-下面是最短路径：
+This is the shortest path to run the project locally.
 
-## 1) 进入项目目录
+## 1) Enter the project directory
 
 ```bash
 cd /path/to/desktop-tutorial
 ```
 
-## 2) 创建并激活虚拟环境
+## 2) Create and activate a virtual environment
 
 ### macOS / Linux
 ```bash
@@ -22,47 +22,48 @@ python -m venv .venv
 .venv\Scripts\Activate.ps1
 ```
 
-## 3) 安装依赖
+## 3) Install dependencies
 
 ```bash
 pip install -U pip
 pip install -r requirements.txt
 ```
 
-> 依赖包含 `torch`、`numpy`、`pandas`、`pyarrow`。
+> Dependencies include `torch`, `numpy`, `pandas`, and `pyarrow`.
 
-## 4) 准备数据目录
+## 4) Prepare the data directory
 
-要求结构：
+Required structure:
 
 ```text
 DATA_ROOT/
-  train/*.csv 或 *.parquet
-  validation/*.csv 或 *.parquet
-  test/*.csv 或 *.parquet
+  train/*.csv or *.parquet
+  validation/*.csv or *.parquet
+  test/*.csv or *.parquet
 ```
 
-并且列名满足项目约定（`piece_id/note_id/.../label/correct_pitch`）。
+Column requirements follow the project schema (`piece_id/note_id/.../label/correct_pitch`).
 
-数据构造约定：**错误样本与干净样本 1:1**。训练时建议开启 `--use_weighted_sampler` 以缓解 `KEEP/REPLACE/DELETE` 类别不均衡。
+Data construction rule: **error samples and clean samples are 1:1**. During training, enable `--use_weighted_sampler` to mitigate residual imbalance among `KEEP/REPLACE/DELETE`.
 
-## 4.5) 若只有 MAESTRO MIDI（没有 clean note tables）
+## 4.5) If you only have MAESTRO MIDI (no clean note tables)
 
-先把 MIDI 转成 clean note tables：
+Convert MAESTRO MIDI files into clean note tables first:
 
 ```bash
-python midi_to_table.py \
+python midi_to_table_train.py \
   --maestro_root /absolute/path/to/maestro-v3.0.0 \
+  --metadata_csv /absolute/path/to/maestro-v3.0.0.csv \
   --output_root /absolute/path/to/clean_note_tables \
   --format parquet
 ```
 
-然后再执行 `prepare_clean_only.py` 补标签并合并到训练目录。
+Then run `prepare_clean_only.py` to add labels and (optionally) merge into your training root.
 
-## 5) 训练（先用 CPU 跑通）
+## 5) Training (start with CPU to verify the pipeline)
 
 ```bash
-python train(2).py \
+python train.py \
   --data_root /absolute/path/to/DATA_ROOT \
   --format csv \
   --window_k 16 \
@@ -77,16 +78,16 @@ python train(2).py \
   --skip_test_eval
 ```
 
-> 说明：`--skip_test_eval` 适合先做“能跑通”验证，避免在 CPU 上最后 test 评估耗时过长。正式跑结果时去掉该参数。
+> Note: `--skip_test_eval` is useful for a quick smoke run. Remove it for full evaluation.
 
-> 断点续跑：可加 `--resume_checkpoint runs/baseline/last.pt`，从上次保存轮次的下一轮继续训练。
+> Resume training: add `--resume_checkpoint runs/baseline/last.pt` to continue from the next epoch.
 
-训练后会生成：
+Outputs:
 - `runs/baseline/best.pt`
 - `runs/baseline/last.pt`
 - `runs/baseline/train_log.json`
 
-## 6) 推理（单文件）
+## 6) Inference (single file)
 
 ```bash
 python infer.py \
@@ -98,7 +99,7 @@ python infer.py \
   --device cpu
 ```
 
-## 7) 推理（目录）
+## 7) Inference (directory)
 
 ```bash
 python infer.py \
@@ -110,7 +111,7 @@ python infer.py \
   --device cpu
 ```
 
-若目录下有多层子目录：
+If the directory contains nested subfolders:
 
 ```bash
 python infer.py \
@@ -121,7 +122,8 @@ python infer.py \
   --recursive \
   --device cpu
 ```
-若你想减少误报，可在推理时直接加阈值后处理（低置信度非 KEEP 动作强制回到 KEEP）：
+
+To reduce false positives, apply threshold post-processing:
 
 ```bash
 python infer.py \
@@ -133,26 +135,14 @@ python infer.py \
   --error_threshold 0.85
 ```
 
-也可以对现有预测结果做阈值扫描（无需重训）：
+## Common issues
 
-```bash
-python sweep_error_threshold.py \
-  --pred_root /absolute/path/to/pred_out_test \
-  --format parquet \
-  --start 0.5 \
-  --stop 0.95 \
-  --step 0.05
-```
-
-## 常见问题
-
-- `ModuleNotFoundError: torch/pandas/numpy`：说明你没在当前 Python 环境安装依赖，回到第 2、3 步。
-- `No training files found`：检查 `--data_root/train` 下是否有对应扩展名文件。
-- `Missing required columns`：输入表缺列，按规范补齐。
-- `train_loss` 或 `val_loss` 出现 `NaN`：常见原因是某个 batch 里没有 `label==1`（替换样本），旧版会导致 pitch loss 为 NaN；请拉取最新代码（已修复为该 batch 的 pitch loss 记为 0）。
-- GPU 训练：将 `--device cpu` 改为 `--device cuda`（前提是本机 CUDA + 对应 torch 版本可用）。
-- 训练结束前出现 `KeyboardInterrupt`（常见在最后 test 评估阶段）：先加 `--skip_test_eval` 或减小数据量（`--max_files_per_split`）验证流程，再做全量运行。
-
+- `ModuleNotFoundError: torch/pandas/numpy`: dependencies are not installed in the current environment. Go back to steps 2–3.
+- `No training files found`: check files under `--data_root/train` and file extensions.
+- `Missing required columns`: input tables are missing required columns.
+- `train_loss` or `val_loss` becomes `NaN`: a batch has no `label==1` (replace samples). The code now treats pitch loss as 0 for that batch.
+- GPU training: change `--device cpu` to `--device cuda` (requires CUDA-compatible PyTorch).
+- Training interrupted near the end: add `--skip_test_eval` or reduce data size with `--max_files_per_split`, then run full training.
 
 ## 8) Single MIDI interactive diagnosis (threshold=0.96)
 
@@ -166,16 +156,12 @@ python midi_diagnose.py \
   --out_format csv
 ```
 
-This prints where predicted errors are and gives replacement suggestions.
+This prints predicted error notes and replacement suggestions.
 
-Windows 单行示例（仅需替换你自己的文件路径）：
+Windows one-line example (replace with your own paths):
 
 ```powershell
-python .\midi_diagnose.py --checkpoint "E:\downloads\桌面\dku\CS309\project\code\runs\full_v2_tune1\best.pt" --midi "E:\downloads\桌面\dku\CS309\project\demo_midis\example.mid" --device cuda --threshold 0.96 --out_path "E:\downloads\桌面\dku\CS309\project\code\pred_one.csv" --out_format csv
+python .\midi_diagnose.py --checkpoint "C:\\project\\runs\\full_v2_tune1\\best.pt" --midi "C:\\project\\demo_midis\\example.mid" --device cuda --threshold 0.96 --out_path "C:\\project\\pred_one.csv" --out_format csv
 ```
 
-说明：`midi_diagnose.py` 内部已包含 MIDI->note table 转换，不需要先手动转 CSV/Parquet。
-
-如果输出是 `predicted_errors=0`，先加 `--print_raw_action_stats` 看阈值前后的类别分布；
-若 MIDI 来源不是 MAESTRO（例如 MuseScore 导出），可再加 `--force_piano_features` 试一版。
-
+Note: `midi_diagnose.py` already includes MIDI -> note-table conversion, so you do not need to convert to CSV/Parquet first.
